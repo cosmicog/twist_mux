@@ -27,12 +27,12 @@
 import rclpy
 import numpy as np
 
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TwistStamped
 from rclpy.action import ActionServer
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy
 from rclpy.node import Node
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Header
 from twist_mux_msgs.action import JoyPriority, JoyTurbo
 from visualization_msgs.msg import Marker
 
@@ -221,13 +221,18 @@ class JoystickRelay(Node):
 
         self._current_priority = Bool()
         self._current_priority.data = self.declare_parameter('priority', True).value
+        self._use_stamped = self.declare_parameter('use_stamped', True).value
         self._velocity_control = VelocityControl(self)
 
         self._marker = TextMarker(self, 0.5, 2.0)
 
-        self._pub_cmd = self.create_publisher(Twist, 'joy_vel_out', 1)
-        self._subscriber = self.create_subscription(
-            Twist, 'joy_vel_in', self._forward_cmd, 1)
+        if self._use_stamped:
+            self._pub_cmd = self.create_publisher(TwistStamped, 'joy_vel_out', 1)
+            self._subscriber = self.create_subscription(
+                TwistStamped, 'joy_vel_in', self._forward_cmd_stamped, 1)
+        else:
+            self._pub_cmd = self.create_publisher(Twist, 'joy_vel_out', 1)
+            self._subscriber = self.create_subscription(Twist, 'joy_vel_in', self._forward_cmd, 1)
 
         self._pub_priority = self.create_publisher(
             Bool, 'joy_priority', QoSProfile(
@@ -263,22 +268,36 @@ class JoystickRelay(Node):
             self, 'joy_turbo_reset', JoyTurbo,
             self._velocity_control.reset_turbo)
 
-    def _forward_cmd(self, cmd):
+    def _forward_cmd(self, cmd: Twist):
         if self._current_priority.data:
             self._pub_cmd.publish(self._velocity_control.scale_twist(cmd))
 
         self._marker.update(self._current_priority.data)
 
-    def _toggle_priority(self):
-        self._current_priority.data = not self._current_priority.data
-        self.get_logger().info("Toggled joy_priority, current status is: %s" %
-                               (self._current_priority.data))
-        self._pub_priority.publish(self._current_priority)
+    def _forward_cmd_stamped(self, cmd: TwistStamped):
+        if self._current_priority.data:
+            msg = TwistStamped()
+            msg.header = cmd.header
+            msg.twist = self._velocity_control.scale_twist(cmd.twist)
+            self._pub_cmd.publish(msg)
+
         self._marker.update(self._current_priority.data)
 
-        # Reset velocity to 0:
-        if self._current_priority.data:
+    def _toggle_priority(self):
+        # Reset velocity to 0 before toggling, no matter what priority is next:
+        if not self._use_stamped:
             self._pub_cmd.publish(Twist())
+        else:
+            msg = TwistStamped()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'joy_teleop'
+            self._pub_cmd.publish(msg)
+
+        self._current_priority.data = not self._current_priority.data
+        self.get_logger().info("Toggled joy_priority, current status is: %s" %
+                               self._current_priority.data)
+        self._pub_priority.publish(self._current_priority)
+        self._marker.update(self._current_priority.data)
 
     def _timer_callback(self):
         self._marker.update(self._current_priority.data)
